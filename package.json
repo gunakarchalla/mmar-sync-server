@@ -1,0 +1,35 @@
+{
+  "name": "mmar-sync-server",
+  "version": "1.0.0",
+  "description": "Real-time collaboration sync server for MMAR using Yjs WebSocket",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "debug": "nodemon --exec ts-node src/index.ts",
+    "test": "echo \"no tests yet\" && exit 0"
+  },
+  "nodemonConfig": {
+    "watch": ["src"],
+    "ext": "ts",
+    "exec": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.5",
+    "jsonwebtoken": "^9.0.2",
+    "lib0": "^0.2.99",
+    "ws": "^8.18.0",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.20"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.13",
+    "nodemon": "^3.1.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  }
+}
