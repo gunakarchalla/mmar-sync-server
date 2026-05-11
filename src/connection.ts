@@ -9,6 +9,8 @@ import { getOrCreateRoom, removeConnection } from './room_manager';
 import { verifyToken, fetchAccessLevel } from './auth';
 import { getCached, setCached } from './access_cache';
 
+const PING_INTERVAL_MS = 30_000;
+
 export async function handleConnection(ws: WebSocket, req: http.IncomingMessage): Promise<void> {
   const reqUrl = req.url ?? '/';
   const [pathname, queryString] = reqUrl.split('?') as [string, string | undefined];
@@ -71,6 +73,21 @@ export async function handleConnection(ws: WebSocket, req: http.IncomingMessage)
 
   room.connections.add(connection);
   console.log(JSON.stringify({ event: 'connection_accepted', room: roomName, level }));
+
+  // Heartbeat: ping every 30 s; terminate if no pong arrives before the next ping.
+  const pingTimer = setInterval(() => {
+    if (!connection.isAlive) {
+      console.log(JSON.stringify({ event: 'connection_timeout', room: roomName }));
+      ws.terminate();
+      return;
+    }
+    connection.isAlive = false;
+    ws.ping();
+  }, PING_INTERVAL_MS);
+
+  ws.on('pong', () => {
+    connection.isAlive = true;
+  });
 
   // Send sync step 1 so the new client can reply with its state diff
   {
@@ -145,16 +162,18 @@ export async function handleConnection(ws: WebSocket, req: http.IncomingMessage)
   });
 
   ws.on('close', () => {
+    clearInterval(pingTimer);
     awarenessProtocol.removeAwarenessStates(
       room.awareness,
       Array.from(connection.controlledAwarenessIds),
-      null
+      'connection-closed'
     );
     removeConnection(connection);
     console.log(JSON.stringify({ event: 'connection_closed', room: roomName }));
   });
 
   ws.on('error', (err: Error) => {
+    clearInterval(pingTimer);
     console.error(JSON.stringify({ event: 'ws_error', room: roomName, error: err.message }));
     removeConnection(connection);
   });

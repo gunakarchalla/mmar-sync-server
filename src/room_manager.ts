@@ -36,8 +36,13 @@ export function getOrCreateRoom(name: string): Room {
       { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
       origin: unknown
     ) => {
-      const conn = origin as Connection | null;
-      if (conn != null) {
+      // origin is a Connection only when an incoming awareness message triggered the update;
+      // it may be a string (e.g. 'connection-closed') or null for system-initiated changes.
+      const conn =
+        origin != null && typeof origin === 'object' && 'controlledAwarenessIds' in origin
+          ? (origin as Connection)
+          : null;
+      if (conn !== null) {
         added.forEach(id => conn.controlledAwarenessIds.add(id));
         removed.forEach(id => conn.controlledAwarenessIds.delete(id));
       }
