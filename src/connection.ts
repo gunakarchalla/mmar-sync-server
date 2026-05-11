@@ -6,14 +6,56 @@ import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import type { Connection } from './types';
 import { getOrCreateRoom, removeConnection } from './room_manager';
+import { verifyToken, fetchAccessLevel } from './auth';
+import { getCached, setCached } from './access_cache';
 
-export function handleConnection(ws: WebSocket, req: http.IncomingMessage): void {
+export async function handleConnection(ws: WebSocket, req: http.IncomingMessage): Promise<void> {
   const reqUrl = req.url ?? '/';
-  const pathname = reqUrl.split('?')[0];
+  const [pathname, queryString] = reqUrl.split('?') as [string, string | undefined];
   const roomName = pathname.startsWith('/') ? pathname.slice(1) : pathname;
 
   if (!roomName) {
     ws.close(4400, 'missing-room-name');
+    return;
+  }
+
+  const params = new URLSearchParams(queryString ?? '');
+  const token = params.get('token');
+
+  if (!token) {
+    console.log(JSON.stringify({ event: 'connection_rejected', room: roomName, code: 4401, reason: 'no-token' }));
+    ws.close(4401, 'unauthorised');
+    return;
+  }
+
+  // Verify JWT signature locally before making an API round-trip
+  try {
+    verifyToken(token);
+  } catch {
+    console.log(JSON.stringify({ event: 'connection_rejected', room: roomName, code: 4401, reason: 'bad-jwt' }));
+    ws.close(4401, 'unauthorised');
+    return;
+  }
+
+  // Fetch access level from API server (with short-lived cache to absorb reconnect storms)
+  let level;
+  try {
+    const cached = getCached(token, roomName);
+    if (cached !== undefined) {
+      level = cached;
+    } else {
+      level = await fetchAccessLevel(token, roomName);
+      setCached(token, roomName, level);
+    }
+  } catch {
+    console.log(JSON.stringify({ event: 'connection_rejected', room: roomName, code: 4500, reason: 'upstream-unavailable' }));
+    ws.close(4500, 'upstream-unavailable');
+    return;
+  }
+
+  if (level === null) {
+    console.log(JSON.stringify({ event: 'connection_rejected', room: roomName, code: 4403, reason: 'forbidden' }));
+    ws.close(4403, 'forbidden');
     return;
   }
 
@@ -22,15 +64,15 @@ export function handleConnection(ws: WebSocket, req: http.IncomingMessage): void
   const connection: Connection = {
     ws,
     roomName,
-    level: 'edit',
+    level,
     isAlive: true,
     controlledAwarenessIds: new Set(),
   };
 
   room.connections.add(connection);
-  console.log(JSON.stringify({ event: 'connection_accepted', room: roomName }));
+  console.log(JSON.stringify({ event: 'connection_accepted', room: roomName, level }));
 
-  // Send sync step 1 so the new client can send back its state diff
+  // Send sync step 1 so the new client can reply with its state diff
   {
     const encoder = encoding.createEncoder();
     encoding.writeVarUint(encoder, 0);
@@ -38,7 +80,7 @@ export function handleConnection(ws: WebSocket, req: http.IncomingMessage): void
     ws.send(encoding.toUint8Array(encoder), { binary: true });
   }
 
-  // Forward any existing awareness states to the new client
+  // Forward existing awareness states to the new client
   const awarenessStates = room.awareness.getStates();
   if (awarenessStates.size > 0) {
     const encoder = encoding.createEncoder();
@@ -65,16 +107,26 @@ export function handleConnection(ws: WebSocket, req: http.IncomingMessage): void
       const messageType = decoding.readVarUint(decoder);
 
       if (messageType === 0) {
-        // Sync message — readSyncMessage handles step1/step2/update internally
         const encoder = encoding.createEncoder();
         encoding.writeVarUint(encoder, 0);
-        syncProtocol.readSyncMessage(decoder, encoder, room.doc, connection);
-        // Send response (sync step 2 or nothing) back to this client only
+
+        if (connection.level === 'read') {
+          // Read-only: respond to SyncStep1 (so the client can receive current doc state)
+          // but drop SyncStep2/Update to prevent any doc mutations (defense-in-depth).
+          const syncSubType = decoding.readVarUint(decoder);
+          if (syncSubType === syncProtocol.messageYjsSyncStep1) {
+            syncProtocol.readSyncStep1(decoder, encoder, room.doc);
+          }
+          // syncSubType 1 (step2) or 2 (yjsUpdate): drop silently
+        } else {
+          syncProtocol.readSyncMessage(decoder, encoder, room.doc, connection);
+        }
+
         if (encoding.length(encoder) > 1) {
           ws.send(encoding.toUint8Array(encoder), { binary: true });
         }
       } else if (messageType === 1) {
-        // Awareness update — apply and broadcast via room awareness listener
+        // Awareness — always forwarded regardless of access level
         awarenessProtocol.applyAwarenessUpdate(
           room.awareness,
           decoding.readVarUint8Array(decoder),

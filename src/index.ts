@@ -15,7 +15,10 @@ const server = http.createServer((_req, res) => {
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws, req) => {
-  handleConnection(ws, req);
+  handleConnection(ws, req).catch((err: unknown) => {
+    console.error(JSON.stringify({ event: 'unhandled_connection_error', error: String(err) }));
+    ws.terminate();
+  });
 });
 
 server.listen(PORT, () => {
