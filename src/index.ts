@@ -1,9 +1,6 @@
 import * as http from 'http';
-import * as dotenv from 'dotenv';
 import { WebSocketServer } from 'ws';
 import { handleConnection } from './connection';
-
-dotenv.config();
 
 const PORT = parseInt(process.env['PORT'] ?? '8060', 10);
 

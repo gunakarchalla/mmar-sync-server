@@ -6,14 +6,14 @@
   "type": "commonjs",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "debug": "nodemon --exec ts-node src/index.ts",
+    "start": "node --require dotenv/config dist/index.js",
+    "debug": "nodemon --exec \"ts-node --require dotenv/config src/index.ts\"",
     "test": "echo \"no tests yet\" && exit 0"
   },
   "nodemonConfig": {
     "watch": ["src"],
     "ext": "ts",
-    "exec": "ts-node src/index.ts"
+    "exec": "ts-node --require dotenv/config src/index.ts"
   },
   "dependencies": {
     "axios": "^1.7.9",

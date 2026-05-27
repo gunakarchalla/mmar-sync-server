@@ -4,6 +4,7 @@ import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
 import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
+import axios from 'axios';
 import type { Connection } from './types';
 import { getOrCreateRoom, removeConnection } from './room_manager';
 import { verifyToken, fetchAccessLevel } from './auth';
@@ -49,9 +50,19 @@ export async function handleConnection(ws: WebSocket, req: http.IncomingMessage)
       level = await fetchAccessLevel(token, roomName);
       setCached(token, roomName, level);
     }
-  } catch {
-    console.log(JSON.stringify({ event: 'connection_rejected', room: roomName, code: 4500, reason: 'upstream-unavailable' }));
-    ws.close(4500, 'upstream-unavailable');
+  } catch (err) {
+    // HTTP 4xx from the API means the token/room is forbidden — not that the upstream is down.
+    // Only treat network errors and 5xx as genuinely unavailable.
+    if (axios.isAxiosError(err) && err.response && err.response.status < 500) {
+      // Cache null so a reconnect storm doesn't hammer the API for a forbidden resource.
+      setCached(token, roomName, null);
+      console.log(JSON.stringify({ event: 'connection_rejected', room: roomName, code: 4403, reason: 'forbidden', status: err.response.status }));
+      ws.close(4403, 'forbidden');
+    } else {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ event: 'connection_rejected', room: roomName, code: 4500, reason: 'upstream-unavailable', error: errMsg }));
+      ws.close(4500, 'upstream-unavailable');
+    }
     return;
   }
 
