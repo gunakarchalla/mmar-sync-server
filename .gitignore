@@ -24,3 +24,8 @@ coverage/
 # logs
 *.log
 
+# Secrets
+.env
+.env.*
+!.env.example
+
