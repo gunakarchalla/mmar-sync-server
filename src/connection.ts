@@ -5,12 +5,18 @@ import * as decoding from 'lib0/decoding';
 import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import axios from 'axios';
-import type { Connection } from './types';
+import type { AccessLevel, Connection } from './types';
 import { getOrCreateRoom, removeConnection } from './room_manager';
 import { verifyToken, fetchAccessLevel } from './auth';
 import { getCached, setCached } from './access_cache';
 
 const PING_INTERVAL_MS = 30_000;
+
+// How often a live connection's access grant is re-read from the API server.
+const ACCESS_REVALIDATE_INTERVAL_MS = parseInt(
+  process.env['ACCESS_REVALIDATE_INTERVAL_MS'] ?? '15000',
+  10
+);
 
 export async function handleConnection(ws: WebSocket, req: http.IncomingMessage): Promise<void> {
   const reqUrl = req.url ?? '/';
@@ -100,6 +106,69 @@ export async function handleConnection(ws: WebSocket, req: http.IncomingMessage)
     connection.isAlive = true;
   });
 
+  // A grant lives in the API server and can be changed or removed at any moment, while
+  // a WebSocket outlives the request that authorised it. The grant behind an open
+  // connection is therefore re-read on an interval: a user whose access is gone is
+  // closed with 4403 (the client turns that into an access-denied notice and closes the
+  // scene tab), and a user whose level merely changed keeps the connection with the
+  // read/write gating that now applies to them.
+  let revalidating = false;
+
+  const revalidateAccess = async (): Promise<void> => {
+    if (revalidating || ws.readyState !== WebSocket.OPEN) return;
+    revalidating = true;
+
+    try {
+      let current: AccessLevel | null;
+      try {
+        const cached = getCached(token, roomName);
+        if (cached !== undefined) {
+          current = cached;
+        } else {
+          current = await fetchAccessLevel(token, roomName);
+          setCached(token, roomName, current);
+        }
+      } catch (err) {
+        const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+        if (status === 401) {
+          // The token expired or was invalidated while the connection was open.
+          console.log(JSON.stringify({ event: 'connection_closed_by_revalidation', room: roomName, code: 4401, reason: 'unauthorised' }));
+          ws.close(4401, 'unauthorised');
+          return;
+        }
+        if (status !== undefined && status < 500) {
+          setCached(token, roomName, null);
+          current = null;
+        } else {
+          // The API server is unreachable or failing. A transient outage must not
+          // disconnect everyone, so the current level stands until the next tick.
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.error(JSON.stringify({ event: 'revalidation_error', room: roomName, error: errMsg }));
+          return;
+        }
+      }
+
+      if (ws.readyState !== WebSocket.OPEN) return;
+
+      if (current === null) {
+        console.log(JSON.stringify({ event: 'connection_closed_by_revalidation', room: roomName, code: 4403, reason: 'access-revoked' }));
+        ws.close(4403, 'forbidden');
+        return;
+      }
+
+      if (current !== connection.level) {
+        console.log(JSON.stringify({ event: 'access_level_changed', room: roomName, from: connection.level, to: current }));
+        connection.level = current;
+      }
+    } finally {
+      revalidating = false;
+    }
+  };
+
+  const accessTimer = setInterval(() => {
+    void revalidateAccess();
+  }, ACCESS_REVALIDATE_INTERVAL_MS);
+
   // Send sync step 1 so the new client can reply with its state diff
   {
     const encoder = encoding.createEncoder();
@@ -174,6 +243,7 @@ export async function handleConnection(ws: WebSocket, req: http.IncomingMessage)
 
   ws.on('close', () => {
     clearInterval(pingTimer);
+    clearInterval(accessTimer);
     awarenessProtocol.removeAwarenessStates(
       room.awareness,
       Array.from(connection.controlledAwarenessIds),
@@ -185,6 +255,7 @@ export async function handleConnection(ws: WebSocket, req: http.IncomingMessage)
 
   ws.on('error', (err: Error) => {
     clearInterval(pingTimer);
+    clearInterval(accessTimer);
     console.error(JSON.stringify({ event: 'ws_error', room: roomName, error: err.message }));
     removeConnection(connection);
   });
